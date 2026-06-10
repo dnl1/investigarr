@@ -1,0 +1,26 @@
+name: investigarr
+
+services:
+  investigarr:
+    build: .
+    image: danilo/investigarr:latest
+    container_name: investigarr
+    restart: unless-stopped
+    ports:
+      - "8788:8788"
+    environment:
+      - TZ=${TZ:-America/Sao_Paulo}
+      - PORT=${PORT:-8788}
+      - LOG_TAIL=${LOG_TAIL:-250}
+      - LOG_SINCE=${LOG_SINCE:-2h}
+      - SERVICES=${SERVICES:-sonarr,radarr,prowlarr,lidarr,jellyseerr,qbittorrent,jellyfin,readarr,mylar3,bazarr,sabnzbd}
+      - JELLYFIN_API_KEY=${JELLYFIN_API_KEY:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data:/app/data
+    networks:
+      - media-net
+
+networks:
+  media-net:
+    external: true
