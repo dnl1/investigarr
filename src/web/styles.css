@@ -28,7 +28,7 @@ body {
   min-height: 100vh;
 }
 
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 
 button {
   border: 1px solid var(--border);
@@ -132,6 +132,27 @@ button:hover {
   color: var(--text-3);
 }
 
+.tailSelect {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-3);
+  font-size: 0.8rem;
+}
+
+.tailSelect select {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.48rem 0.65rem;
+  outline: none;
+}
+
+.tailSelect select:focus {
+  border-color: var(--accent);
+}
+
 /* Filter panels row */
 .filterRow {
   display: grid;
@@ -166,6 +187,13 @@ button:hover {
 .panelHead button {
   font-size: 0.75rem;
   padding: 0.25rem 0.6rem;
+}
+
+.panelActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: flex-end;
 }
 
 .chips {

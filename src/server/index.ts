@@ -11,6 +11,7 @@ import { type Settings, getSettings, updateSettings } from "./settings.js";
 const app = Fastify({ logger: true });
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(__dirname, "../web");
+const maxLogTail = 5000;
 
 app.get("/api/services", async () => {
   return getServiceStatuses(services);
@@ -103,7 +104,8 @@ app.get("/events/logs", async (request, reply) => {
   const selectedServices = new Set((query.services ?? services.map((service) => service.name).join(",")).split(",").filter(Boolean));
   const selectedLevels = new Set((query.levels ?? "").split(",").filter(Boolean));
   const search = (query.q ?? "").trim().toLowerCase();
-  const tail = Math.min(Number(query.tail ?? logTail), 1000);
+  const requestedTail = Number(query.tail ?? logTail);
+  const tail = Number.isFinite(requestedTail) && requestedTail > 0 ? Math.min(requestedTail, maxLogTail) : logTail;
   const streamServices = services.filter((service) => selectedServices.has(service.name));
 
   reply.raw.writeHead(200, {
@@ -127,6 +129,7 @@ app.get("/events/logs", async (request, reply) => {
       since: logSince,
       meta: enrichMap.get(service.name) ?? null,
       onEntry: (entry) => {
+        if (query.levels !== undefined && selectedLevels.size === 0) return;
         if (!shouldIncludeLevel(entry.level, selectedLevels)) return;
         if (search && !`${entry.service} ${entry.message}`.toLowerCase().includes(search)) return;
         reply.raw.write(`event: log\ndata: ${JSON.stringify(entry)}\n\n`);

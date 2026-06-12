@@ -57,7 +57,8 @@ function resolverStatus(results: ResolverResult[]): "ok" | "fail" | "running" {
 
 const levels: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal", "unknown"];
 const defaultLevels = new Set<LogLevel>(["info", "warn", "debug", "error", "fatal", "unknown"]);
-const maxEntries = 1500;
+const defaultTailLimit = 1000;
+const tailLimitOptions = [500, 1000, 2000, 5000];
 
 const runbookServices = [...new Set(runbook.map((e) => e.service))].sort();
 
@@ -66,6 +67,7 @@ function App() {
   const [selectedServices, setSelectedServices] = useState<Set<string>>(new Set());
   const [selectedLevels, setSelectedLevels] = useState<Set<LogLevel>>(defaultLevels);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [tailLimit, setTailLimit] = useState(defaultTailLimit);
   const [search, setSearch] = useState("");
   const [submittedSearch, setSubmittedSearch] = useState("");
   const [isPaused, setPaused] = useState(false);
@@ -127,15 +129,16 @@ function App() {
   }, [isPaused]);
 
   useEffect(() => {
-    if (selectedServices.size === 0 || services.length === 0) return;
     setLogs([]);
     setConnected(false);
+    pausedBuffer.current = [];
+    if (selectedServices.size === 0 || selectedLevels.size === 0 || services.length === 0) return;
 
     const params = new URLSearchParams({
       services: selectedServiceKey,
       levels: selectedLevelKey,
       q: submittedSearch,
-      tail: "250"
+      tail: String(tailLimit)
     });
     const source = new EventSource(`/events/logs?${params.toString()}`);
 
@@ -143,7 +146,7 @@ function App() {
     source.addEventListener("log", (event) => {
       const entry = JSON.parse((event as MessageEvent).data) as LogEntry;
       if (isPausedRef.current) {
-        pausedBuffer.current = [entry, ...pausedBuffer.current].slice(0, maxEntries);
+        pausedBuffer.current = [entry, ...pausedBuffer.current].slice(0, tailLimit);
         return;
       }
       appendLog(entry);
@@ -151,14 +154,14 @@ function App() {
     source.onerror = () => setConnected(false);
 
     return () => source.close();
-  }, [services.length, selectedServiceKey, selectedLevelKey, submittedSearch]);
+  }, [services.length, selectedServices.size, selectedLevels.size, selectedServiceKey, selectedLevelKey, submittedSearch, tailLimit]);
 
   useEffect(() => {
     if (!isPaused && pausedBuffer.current.length > 0) {
-      setLogs((cur) => [...pausedBuffer.current, ...cur].slice(0, maxEntries));
+      setLogs((cur) => [...pausedBuffer.current, ...cur].slice(0, tailLimit));
       pausedBuffer.current = [];
     }
-  }, [isPaused]);
+  }, [isPaused, tailLimit]);
 
   useEffect(() => {
     if (autoScroll) logTopRef.current?.scrollIntoView({ block: "start" });
@@ -232,7 +235,7 @@ function App() {
   }, [runbookFilter]);
 
   function appendLog(entry: LogEntry) {
-    setLogs((cur) => [entry, ...cur].slice(0, maxEntries));
+    setLogs((cur) => [entry, ...cur].slice(0, tailLimit));
   }
 
   function toggleService(name: string) {
@@ -255,6 +258,18 @@ function App() {
 
   function showAllServices() {
     setSelectedServices(new Set(services.map((s) => s.name)));
+  }
+
+  function showNoServices() {
+    setSelectedServices(new Set());
+  }
+
+  function showAllLevels() {
+    setSelectedLevels(new Set(levels));
+  }
+
+  function showNoLevels() {
+    setSelectedLevels(new Set());
   }
 
   function showOnlyProblems() {
@@ -539,7 +554,16 @@ function App() {
             placeholder="Filter log messages..."
           />
           <button type="submit">Search</button>
+          {submittedSearch && <button type="button" onClick={() => { setSearch(""); setSubmittedSearch(""); }}>Clear</button>}
         </form>
+        <label className="tailSelect">
+          <span>Tail</span>
+          <select value={tailLimit} onChange={(e) => setTailLimit(Number(e.target.value))}>
+            {tailLimitOptions.map((limit) => (
+              <option key={limit} value={limit}>{limit}</option>
+            ))}
+          </select>
+        </label>
         <div className="spacer" />
         <button onClick={() => setPaused((v) => !v)}>{isPaused ? "Resume" : "Pause"}</button>
         <button onClick={() => setAutoScroll((v) => !v)}>
@@ -566,7 +590,10 @@ function App() {
         <div className="panel">
           <div className="panelHead">
             <h2>Services</h2>
-            <button onClick={showAllServices}>All</button>
+            <div className="panelActions">
+              <button onClick={showAllServices}>All</button>
+              <button onClick={showNoServices}>None</button>
+            </div>
           </div>
           <div className="chips">
             {services.map((s) => (
@@ -586,7 +613,11 @@ function App() {
         <div className="panel">
           <div className="panelHead">
             <h2>Levels</h2>
-            <button onClick={showOnlyProblems}>Issues</button>
+            <div className="panelActions">
+              <button onClick={showAllLevels}>All</button>
+              <button onClick={showNoLevels}>None</button>
+              <button onClick={showOnlyProblems}>Issues</button>
+            </div>
           </div>
           <div className="chips">
             {levels.map((level) => (
@@ -623,7 +654,9 @@ function App() {
         <div className="logHead">
           <span>Timeline</span>
           <span>
-            {isPaused && pausedBuffer.current.length > 0
+            {selectedServices.size === 0 || selectedLevels.size === 0
+              ? "no filters selected"
+              : isPaused && pausedBuffer.current.length > 0
               ? `${pausedBuffer.current.length} buffered`
               : "live"}
           </span>
