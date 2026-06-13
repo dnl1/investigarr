@@ -7,16 +7,18 @@ services:
     container_name: investigarr
     restart: unless-stopped
     ports:
-      - "172.24.0.1:8788:8788"
+      - "${DOCKER_BIND_IP}:8788:8788"
     environment:
       - TZ=${TZ:-America/Sao_Paulo}
       - PORT=${PORT:-8788}
+      - INVESTIGARR_USERNAME=${INVESTIGARR_USERNAME:-admin}
+      - INVESTIGARR_PASSWORD=${INVESTIGARR_PASSWORD:?Set INVESTIGARR_PASSWORD in .env}
       - LOG_TAIL=${LOG_TAIL:-250}
       - LOG_SINCE=${LOG_SINCE:-2h}
       - SERVICES=${SERVICES:-sonarr,radarr,prowlarr,lidarr,seerr,qbittorrent,jellyfin,readarr,mylar3,bazarr,sabnzbd}
       - JELLYFIN_API_KEY=${JELLYFIN_API_KEY:-}
     volumes:
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ${DOCKER_CONTAINERS_DIR:-/var/lib/docker/containers}:/var/lib/docker/containers:ro
       - ./data:/app/data
     networks:
       - media-net
