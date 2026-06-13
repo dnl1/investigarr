@@ -48,13 +48,14 @@ type ResolverInfo = {
   selectableService?: { label: string; default: string; options: Array<{ label: string; value: string }> };
   relevantLogPatterns?: PatternDef[];
 };
-type ResolverResult = { label: string; status: "ok" | "fail" | "running"; error?: string; output?: string };
+type ResolverResult = { label: string; status: "ok" | "fail" | "running"; error?: string; code?: string; output?: string };
 type ResolverExecution = { id: string; results: ResolverResult[] };
 type SettingsResponse = {
   apiKeys: Record<string, string>;
   apiKeyConfigured?: Record<string, boolean>;
   serviceUrls: Record<string, string>;
   logPaths: Record<string, string>;
+  dockerProxyUrl: string;
 };
 
 function resolverStatus(results: ResolverResult[]): "ok" | "fail" | "running" {
@@ -150,12 +151,13 @@ function App() {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [selectedRestartSvcs, setSelectedRestartSvcs] = useState<Set<string>>(new Set());
   const [showSettings, setShowSettings] = useState(false);
-  const [settings, setSettings] = useState<{ apiKeys: Record<string, string>; serviceUrls: Record<string, string>; logPaths: Record<string, string> }>({ apiKeys: {}, serviceUrls: {}, logPaths: {} });
+  const [settings, setSettings] = useState<{ apiKeys: Record<string, string>; serviceUrls: Record<string, string>; logPaths: Record<string, string>; dockerProxyUrl: string }>({ apiKeys: {}, serviceUrls: {}, logPaths: {}, dockerProxyUrl: "" });
   const [draftKeys, setDraftKeys] = useState<Record<string, string>>({});
   const [configuredKeys, setConfiguredKeys] = useState<Record<string, boolean>>({});
   const [clearedKeys, setClearedKeys] = useState<Set<string>>(new Set());
   const [draftUrls, setDraftUrls] = useState<Record<string, string>>({});
   const [draftPaths, setDraftPaths] = useState<Record<string, string>>({});
+  const [dockerProxyDraft, setDockerProxyDraft] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
   const [customName, setCustomName] = useState("");
   const [customContainer, setCustomContainer] = useState("");
@@ -181,12 +183,13 @@ function App() {
     void fetch("/api/settings")
       .then((r) => r.json())
       .then((data: SettingsResponse) => {
-        setSettings({ apiKeys: data.apiKeys, serviceUrls: data.serviceUrls, logPaths: data.logPaths ?? {} });
+        setSettings({ apiKeys: data.apiKeys, serviceUrls: data.serviceUrls, logPaths: data.logPaths ?? {}, dockerProxyUrl: data.dockerProxyUrl ?? "" });
         setConfiguredKeys({ ...(data.apiKeyConfigured ?? {}) });
         setDraftKeys({});
         setClearedKeys(new Set());
         setDraftUrls({ ...data.serviceUrls });
         setDraftPaths({ ...(data.logPaths ?? {}) });
+        setDockerProxyDraft(data.dockerProxyUrl ?? "");
       });
   }, []);
 
@@ -686,6 +689,42 @@ function App() {
                   <span className="rs-step-label">{step.label}</span>
                   {step.output && <code className="rs-step-out">{step.output}</code>}
                   {step.error && <span className="rs-step-err">{step.error}</span>}
+                  {step.code === "DOCKER_PROXY_REQUIRED" && (
+                    <div className="rs-proxy-prompt">
+                      <span className="rs-proxy-label">Configure um Docker socket proxy para habilitar restarts:</span>
+                      <div className="settings-input-row">
+                        <input
+                          type="text"
+                          className="settings-input"
+                          placeholder="http://dockerproxy:2375"
+                          value={dockerProxyDraft}
+                          onChange={(e) => setDockerProxyDraft(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        className="rb-act"
+                        disabled={!dockerProxyDraft.trim() || executingIds.size > 0}
+                        onClick={async () => {
+                          await fetch("/api/settings", {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ dockerProxyUrl: dockerProxyDraft.trim() })
+                          });
+                          setSettings((s) => ({ ...s, dockerProxyUrl: dockerProxyDraft.trim() }));
+                          if (r.id === "restart-service") {
+                            for (const svc of selectedRestartSvcs) {
+                              await runResolver(r.id, svc);
+                              await new Promise((res) => setTimeout(res, 500));
+                            }
+                          } else {
+                            await runResolver(r.id);
+                          }
+                        }}
+                      >
+                        Salvar e tentar novamente
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -750,7 +789,7 @@ function App() {
             <span className="resolve-badge">{relevantResolverIds.size}</span>
           )}
         </button>
-        <button className="btn-accent settings-btn" title="API Keys" onClick={() => { setDraftKeys({}); setClearedKeys(new Set()); setDraftUrls({ ...settings.serviceUrls }); setDraftPaths({ ...settings.logPaths }); setShowSettings(true); }}>
+        <button className="btn-accent settings-btn" title="API Keys" onClick={() => { setDraftKeys({}); setClearedKeys(new Set()); setDraftUrls({ ...settings.serviceUrls }); setDraftPaths({ ...settings.logPaths }); setDockerProxyDraft(settings.dockerProxyUrl); setShowSettings(true); }}>
           ⚙
         </button>
       </div>
@@ -1003,6 +1042,25 @@ function App() {
                   </div>
                 </div>
               ))}
+              <div className="settings-field settings-field-docker">
+                <label>
+                  <span className="settings-label">Docker Socket Proxy</span>
+                  <span className="settings-container">container actions</span>
+                </label>
+                <div className="settings-input-row">
+                  <input
+                    type="text"
+                    className="settings-input"
+                    placeholder="http://dockerproxy:2375"
+                    value={dockerProxyDraft}
+                    onChange={(e) => setDockerProxyDraft(e.target.value)}
+                  />
+                  {dockerProxyDraft && (
+                    <button className="settings-clear" onClick={() => setDockerProxyDraft("")}>✕</button>
+                  )}
+                </div>
+                <p className="settings-hint">URL de um docker-socket-proxy para habilitar restart de containers via API.</p>
+              </div>
               <button
                 className="settings-save"
                 disabled={savingSettings}
@@ -1025,12 +1083,12 @@ function App() {
                     const res = await fetch("/api/settings", {
                       method: "PUT",
                       headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ apiKeys: cleanedKeys, serviceUrls: cleanedUrls, logPaths: cleanedPaths })
+                      body: JSON.stringify({ apiKeys: cleanedKeys, serviceUrls: cleanedUrls, logPaths: cleanedPaths, dockerProxyUrl: dockerProxyDraft.trim() })
                     });
                     if (!res.ok) throw new Error(await res.text());
                     const nextConfigured = { ...configuredKeys };
                     for (const [k, v] of Object.entries(cleanedKeys)) nextConfigured[k] = Boolean(v);
-                    setSettings({ apiKeys: {}, serviceUrls: cleanedUrls, logPaths: cleanedPaths });
+                    setSettings({ apiKeys: {}, serviceUrls: cleanedUrls, logPaths: cleanedPaths, dockerProxyUrl: dockerProxyDraft.trim() });
                     setConfiguredKeys(nextConfigured);
                     setDraftKeys({});
                     setClearedKeys(new Set());

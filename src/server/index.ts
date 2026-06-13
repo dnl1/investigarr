@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import { logSince, logTail, port } from "./config.js";
-import { getServiceStatuses, listContainers, restartContainer } from "./docker.js";
+import { getServiceStatuses, listContainers, restartContainer, DockerProxyRequiredError } from "./docker.js";
 import { LogHub } from "./log-hub.js";
 import { resolvers, runResolver } from "./resolvers.js";
 import { addCustomService, getAllServices, type Settings, getSettings, removeCustomService, updateSettings } from "./settings.js";
@@ -130,7 +130,10 @@ app.post("/api/actions/restart/:container", async (request, reply) => {
     await restartContainer(container);
     return { success: true, container };
   } catch (err) {
-    reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
+    if (err instanceof DockerProxyRequiredError) {
+      return reply.status(503).send({ error: err.message, code: err.code });
+    }
+    return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -170,12 +173,13 @@ app.get("/api/settings", async () => {
     apiKeyConfigured: Object.fromEntries(svcsWithKey.map((svc) => [svc.name, Boolean(s.apiKeys[svc.name])])),
     serviceUrls: Object.fromEntries(svcs.map((svc) => [svc.name, s.serviceUrls[svc.name] ?? ""])),
     logPaths: Object.fromEntries(svcs.map((svc) => [svc.name, s.logPaths[svc.name] ?? ""])),
+    dockerProxyUrl: s.dockerProxyUrl || process.env.DOCKER_PROXY_URL || "",
     customServices: s.customServices
   };
 });
 
 app.put("/api/settings", async (request, reply) => {
-  const body = request.body as { apiKeys?: Record<string, string>; serviceUrls?: Record<string, string>; logPaths?: Record<string, string> };
+  const body = request.body as { apiKeys?: Record<string, string>; serviceUrls?: Record<string, string>; logPaths?: Record<string, string>; dockerProxyUrl?: string };
   if (!body || typeof body !== "object") {
     reply.status(400).send({ error: "Invalid body" });
     return;
@@ -209,6 +213,9 @@ app.put("/api/settings", async (request, reply) => {
       if (v) cleaned[key] = v;
     }
     update.logPaths = cleaned;
+  }
+  if (typeof body.dockerProxyUrl === "string") {
+    update.dockerProxyUrl = body.dockerProxyUrl.trim();
   }
   updateSettings(update);
   return { success: true };

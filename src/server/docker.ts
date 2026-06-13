@@ -93,9 +93,22 @@ export function streamContainerLogs(options: LogStreamOptions): () => void {
   return () => {};
 }
 
-export function restartContainer(_containerName: string): never {
-  throw new Error(
-    "Container restart requires Docker API access, which is not available in filesystem-only mode. " +
-    "Restart the container from the host or configure a systemd timer."
-  );
+export class DockerProxyRequiredError extends Error {
+  readonly code = "DOCKER_PROXY_REQUIRED" as const;
+  constructor() {
+    super("Docker socket proxy not configured. Enter the proxy URL in ⚙ Settings to enable container restarts.");
+    this.name = "DockerProxyRequiredError";
+  }
+}
+
+export async function restartContainer(containerName: string): Promise<void> {
+  const proxyUrl = getSettings().dockerProxyUrl.trim() || process.env.DOCKER_PROXY_URL?.trim() || "";
+  if (!proxyUrl) throw new DockerProxyRequiredError();
+
+  const base = proxyUrl.replace(/\/$/, "");
+  const res = await fetch(`${base}/containers/${encodeURIComponent(containerName)}/restart`, { method: "POST" });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Docker API returned ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+  }
 }

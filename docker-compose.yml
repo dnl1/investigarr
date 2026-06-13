@@ -17,12 +17,31 @@ services:
       - LOG_SINCE=${LOG_SINCE:-2h}
       - SERVICES=${SERVICES:-sonarr,radarr,prowlarr,lidarr,seerr,qbittorrent,jellyfin,readarr,mylar3,bazarr,sabnzbd}
       - JELLYFIN_API_KEY=${JELLYFIN_API_KEY:-}
+      - DOCKER_PROXY_URL=${DOCKER_PROXY_URL:-http://dockerproxy:2375}
     volumes:
       - ${DOCKER_CONTAINERS_DIR:-/var/lib/docker/containers}:/var/lib/docker/containers:ro
       - ./data:/app/data
     networks:
       - media-net
+      - investigarr-internal
+    depends_on:
+      - dockerproxy
+
+  dockerproxy:
+    image: ghcr.io/tecnativa/docker-socket-proxy:latest
+    container_name: investigarr-dockerproxy
+    restart: unless-stopped
+    environment:
+      - CONTAINERS=1
+      - RESTARTS=1
+      - POST=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - investigarr-internal
 
 networks:
   media-net:
     external: true
+  investigarr-internal:
+    internal: true

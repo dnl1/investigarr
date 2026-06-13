@@ -1042,6 +1042,22 @@ button:disabled {
   word-break: break-all;
 }
 
+.rs-proxy-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-2);
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+}
+
+.rs-proxy-label {
+  font-size: 0.72rem;
+  color: var(--text-2);
+}
+
 /* ─── Settings ─── */
 
 .settings-btn {
@@ -1052,6 +1068,18 @@ button:disabled {
 
 .settings-field {
   margin-bottom: 0.75rem;
+}
+
+.settings-field-docker {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.settings-hint {
+  font-size: 0.68rem;
+  color: var(--text-3);
+  margin: 0.2rem 0 0;
 }
 
 .settings-field label {

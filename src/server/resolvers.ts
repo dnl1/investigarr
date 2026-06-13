@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { restartContainer } from "./docker.js";
+import { restartContainer, DockerProxyRequiredError } from "./docker.js";
 import { lookupApiKey, lookupServiceUrl } from "./settings.js";
 
 export type ResolverStep = {
@@ -37,6 +37,7 @@ export type ResolverResult = {
   label: string;
   status: "ok" | "fail" | "running";
   error?: string;
+  code?: string;
   output?: string;
 };
 
@@ -44,7 +45,7 @@ export const resolvers: Resolver[] = [
   {
     id: "restart-service",
     title: "Restart service",
-    description: "[Unavailable — requires Docker API] Restart a selected service from the host with 'docker restart <container>'.",
+    description: "Restart a selected service container. Requires a Docker socket proxy configured in ⚙ Settings.",
     service: "general",
     actionLabel: "Restart",
     selectableService: {
@@ -215,7 +216,8 @@ export async function runResolver(id: string, input?: { selectedService?: string
       results[results.length - 1] = {
         label: step.label,
         status: "fail",
-        error: err instanceof Error ? err.message : String(err)
+        error: err instanceof Error ? err.message : String(err),
+        code: err instanceof DockerProxyRequiredError ? err.code : undefined
       };
       return { id, results };
     }
