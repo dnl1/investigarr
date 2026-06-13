@@ -58,7 +58,7 @@ Open `http://localhost:8788`.
 
 ## How It Works
 
-1. **Log streaming** — connects to the Docker socket (`/var/run/docker.sock`, read-only) and tails the multiplexed log stream for each configured container. Logs are parsed for timestamp, level, and multi-line continuations.
+1. **Log streaming** — reads Docker container logs directly from the host filesystem (`/var/lib/docker/containers/<id>/<id>-json.log`). No Docker socket or API is used. Logs are parsed as JSON lines with `stream` (stdout/stderr), `time`, and `log` fields.
 
 2. **Suggestions** — 12 rules evaluate recent log entries (5-60 minute windows) using pattern matching and frequency heuristics. Each suggestion links to a runbook entry and/or a resolver.
 
@@ -104,8 +104,12 @@ Log streaming and container restart resolvers are not available without Docker s
 
 ## Security
 
-- The Docker socket is mounted **read-only**. The container can only inspect containers, read logs, and restart known services.
-- All HTTP communication is local within the Docker network. Expose it behind a reverse proxy with authentication if you need external access.
+- **No Docker socket access.** Investigarr reads container logs and configs directly from the host filesystem (`/var/lib/docker/containers/`) mounted as a read-only volume. No Docker Unix socket is mounted.
+- **No Docker API calls.** All interaction with Docker is done through file I/O — reading `config.v2.json` for container metadata and `<id>-json.log` for log streams. There is zero Docker API surface.
+- **Read-only filesystem access.** The container can only read Docker's data directory; it cannot write to it or execute Docker commands. The `docker-cli` binary is not installed.
+- **No container restart capability.** The "Restart service" resolver is unavailable without Docker API access. Restart containers from the host with `docker restart <container>` or a systemd timer.
+- **API keys must be configured manually.** For API-based resolvers (force search, library refresh), enter the API key in the ⚙ Settings drawer. Auto-extraction from container config files is not available in filesystem-only mode.
+- All HTTP communication is local within the Docker network. Expose Investigarr behind a reverse proxy with authentication if you need external access.
 - API keys stored in settings are only used for authenticated requests to the \*arr services from within the container.
 
 ## Development

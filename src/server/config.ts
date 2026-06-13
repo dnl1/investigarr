@@ -7,7 +7,7 @@ export const port = Number(process.env.PORT ?? 8788);
 export const logTail = Number(process.env.LOG_TAIL ?? 250);
 export const logSince = process.env.LOG_SINCE ?? "2h";
 
-const defaultServices = "sonarr,radarr,prowlarr,lidarr,jellyseerr,qbittorrent,jellyfin,readarr,mylar3";
+const defaultServices = "sonarr,radarr,prowlarr,lidarr,seerr,qbittorrent,jellyfin,readarr,mylar3";
 
 export const services: Service[] = (process.env.SERVICES ?? defaultServices)
   .split(",")
@@ -16,8 +16,13 @@ export const services: Service[] = (process.env.SERVICES ?? defaultServices)
   .map((name, index) => ({
     name,
     container: name,
-    color: palette[index % palette.length]
+    color: palette[index % palette.length],
+    source: "default"
   }));
+
+export function serviceColor(index: number): string {
+  return palette[index % palette.length];
+}
 
 /** Well-known default ports for each service (used for auto-generated URLs). */
 export const servicePorts: Record<string, number> = {
@@ -25,17 +30,18 @@ export const servicePorts: Record<string, number> = {
   radarr: 7878,
   prowlarr: 9696,
   lidarr: 8686,
-  jellyseerr: 5055,
+  seerr: 5055,
   qbittorrent: 8081,
   jellyfin: 8096,
   readarr: 8787,
   mylar3: 8090,
 };
 
-/** Check if Docker socket is available. */
+/** Check if Docker logs directory is accessible. */
 export function hasDocker(): boolean {
   try {
-    return existsSync("/var/run/docker.sock");
+    const dir = process.env.DOCKER_LOGS || "/var/lib/docker/containers";
+    return existsSync(dir);
   } catch {
     return false;
   }

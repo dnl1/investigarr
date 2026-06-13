@@ -1,46 +1,80 @@
-import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ContainerSummary, LogEntry, LogEntryMeta, Service, ServiceStatus } from "./types.js";
 import { detectLevel } from "./log-level.js";
 
-const socketPath = "/var/run/docker.sock";
+const DOCKER_LOGS = process.env.DOCKER_LOGS || "/var/lib/docker/containers";
 
-function dockerRequest(path: string, method = "GET"): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const req = http.request({ socketPath, path, method }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () => {
-        const body = Buffer.concat(chunks);
-        if ((res.statusCode ?? 500) >= 400) {
-          reject(new Error(`Docker API ${res.statusCode}: ${body.toString("utf8")}`));
-          return;
-        }
-        resolve(body);
-      });
-    });
-
-    req.on("error", reject);
-    req.end();
-  });
+interface ContainerConfig {
+  Name: string;
+  State: { Running: boolean; Paused: boolean; Restarting: boolean; Dead: boolean; StartedAt: string; FinishedAt: string };
+  Config: { Image: string; Cmd: string[]; Env: string[] };
 }
 
-export async function listContainers(): Promise<ContainerSummary[]> {
-  const body = await dockerRequest("/containers/json?all=true");
-  return JSON.parse(body.toString("utf8")) as ContainerSummary[];
+function containerState(s: ContainerConfig["State"]): string {
+  if (s.Dead) return "dead";
+  if (s.Restarting) return "restarting";
+  if (s.Paused) return "paused";
+  if (s.Running) return "running";
+  return "exited";
 }
 
-export async function getServiceStatuses(services: Service[]): Promise<ServiceStatus[]> {
-  const containers = await listContainers();
+interface DiscoveredContainer {
+  id: string;
+  config: ContainerConfig;
+}
+
+function discoverContainers(): DiscoveredContainer[] {
+  let ids: string[];
+  try {
+    ids = fs.readdirSync(DOCKER_LOGS);
+  } catch {
+    return [];
+  }
+
+  const results: DiscoveredContainer[] = [];
+  for (const id of ids) {
+    if (id.length !== 64 || !/^[a-f0-9]+$/.test(id)) continue;
+    try {
+      const config: ContainerConfig = JSON.parse(
+        fs.readFileSync(path.join(DOCKER_LOGS, id, "config.v2.json"), "utf8")
+      );
+    if (config.Name) {
+      // Sometimes configs have a leading / on the name, normalize it
+      if (typeof config.Name === "string" && config.Name.startsWith("/")) {
+        config.Name = config.Name.slice(1);
+      }
+      results.push({ id, config });
+    }
+  } catch {
+      // skip unreadable
+    }
+  }
+  return results;
+}
+
+export function listContainers(): ContainerSummary[] {
+  return discoverContainers().map(({ id, config }) => ({
+    Id: id,
+    Names: ["/" + config.Name],
+    Image: config.Config?.Image ?? "",
+    State: containerState(config.State),
+    Status: config.State?.Running ? "running" : "stopped"
+  }));
+}
+
+export function getServiceStatuses(services: Service[]): ServiceStatus[] {
+  const containers = discoverContainers();
 
   return services.map((service) => {
-    const container = containers.find((item) => item.Names.includes(`/${service.container}`));
+    const c = containers.find((c) => c.config.Name === service.container);
     return {
       ...service,
-      id: container?.Id ?? null,
-      image: container?.Image ?? null,
-      state: container?.State ?? "missing",
-      status: container?.Status ?? null
+      id: c?.id ?? null,
+      image: c?.config.Config?.Image ?? null,
+      state: c ? containerState(c.config.State) : "missing",
+      status: c?.config.State?.Running ? "running" : (c ? "stopped" : null)
     };
   });
 }
@@ -52,149 +86,161 @@ export function streamContainerLogs(options: {
   meta?: LogEntryMeta | null;
   onEntry: (entry: LogEntry) => void;
   onError: (error: Error) => void;
+  onEnd?: () => void;
 }): () => void {
-  const searchParams = new URLSearchParams({
-    stdout: "true",
-    stderr: "true",
-    follow: "true",
-    timestamps: "true",
-    tail: String(options.tail)
-  });
-
-  if (options.since) {
-    const since = toDockerSince(options.since);
-    if (since) searchParams.set("since", since);
-  }
-
-  const req = http.request(
-    {
-      socketPath,
-      path: `/containers/${encodeURIComponent(options.service.container)}/logs?${searchParams.toString()}`,
-      method: "GET"
-    },
-    (res) => {
-      if ((res.statusCode ?? 500) >= 400) {
-        let errorBody = "";
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => {
-          errorBody += chunk;
-        });
-        res.on("end", () => options.onError(new Error(errorBody || `Docker API ${res.statusCode}`)));
-        return;
-      }
-
-      let pending: { timestamp: string; message: string } | null = null;
-
-      function flushPending() {
-        if (!pending) return;
-        // Strip ANSI escape sequences from the raw Docker log multiplexed stream
-        const sanitized = pending.message.replace(/\x1b\[[0-9;]*m/g, "");
-        options.onEntry({
-          id: randomUUID(),
-          service: options.service.name,
-          container: options.service.container,
-          timestamp: pending.timestamp,
-          level: detectLevel(sanitized),
-          message: sanitized,
-          meta: options.meta ?? null
-        });
-        pending = null;
-      }
-
-      parseDockerLogStream(res, (line) => {
-        const { timestamp, message } = parseTimestamp(line);
-
-        if (pending && /^\s/.test(message)) {
-          pending.message += "\n" + message;
-          return;
-        }
-
-        flushPending();
-        pending = { timestamp, message };
-      });
-
-      res.on("end", flushPending);
-    }
+  const container = discoverContainers().find(
+    (c) => c.config.Name === options.service.container
   );
 
-  req.on("error", options.onError);
-  req.end();
+  if (!container) {
+    options.onError(new Error(`Container not found: ${options.service.container}`));
+    return () => {};
+  }
 
-  return () => req.destroy();
-}
+  const logFile = path.join(DOCKER_LOGS, container.id, `${container.id}-json.log`);
+  let destroyed = false;
+  let filePos = 0;
 
-export async function restartContainer(containerName: string): Promise<void> {
-  await dockerRequest(`/containers/${encodeURIComponent(containerName)}/restart`, "POST");
-}
+  // Cap on how many bytes to read on the initial pass — avoids OOM on large log files
+  const MAX_INITIAL_BYTES = 2 * 1024 * 1024;
 
-function parseDockerLogStream(stream: NodeJS.ReadableStream, onLine: (line: string) => void) {
-  let buffer = Buffer.alloc(0);
-  let textBuffer = "";
+  function parseLogLine(raw: string): LogEntry | null {
+    try {
+      const parsed = JSON.parse(raw);
+      const message = (parsed.log ?? "").replace(/\n$/, "");
+      if (!message) return null;
+      const timestamp = parsed.time || new Date().toISOString();
+      return {
+        id: randomUUID(),
+        service: options.service.name,
+        container: options.service.container,
+        timestamp,
+        level: detectLevel(message),
+        message,
+        meta: options.meta ?? null
+      };
+    } catch {
+      return null;
+    }
+  }
 
-  stream.on("data", (chunk: Buffer) => {
-    buffer = Buffer.concat([buffer, chunk]);
+  function readSince(ts: string): number | null {
+    const trimmed = ts.trim();
+    if (!trimmed) return null;
+    if (/^\d+$/.test(trimmed)) return Number(trimmed);
+    const m = trimmed.match(/^(\d+)(s|m|h|d)$/i);
+    if (m) {
+      const mul = { s: 1, m: 60, h: 3600, d: 86400 }[m[2].toLowerCase()] ?? 1;
+      return Math.floor(Date.now() / 1000) - Number(m[1]) * mul;
+    }
+    const parsed = Date.parse(trimmed);
+    return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000);
+  }
 
-    while (buffer.length > 0) {
-      if (looksLikeMultiplexFrame(buffer)) {
-        if (buffer.length < 8) return;
-        const payloadLength = buffer.readUInt32BE(4);
-        if (buffer.length < 8 + payloadLength) return;
-        const payload = buffer.subarray(8, 8 + payloadLength);
-        buffer = buffer.subarray(8 + payloadLength);
-        textBuffer = emitLines(textBuffer + payload.toString("utf8"), onLine);
-        continue;
+  const sinceUnix = options.since ? readSince(options.since) : null;
+
+  // Initial tail + history read
+  let initialDone = false;
+  let initialBuf: LogEntry[] = [];
+
+  function readAndEmit(pos: number, emit: boolean): number {
+    try {
+      const stat = fs.statSync(logFile);
+      const newSize = stat.size;
+      // File truncated or rotated — reset position
+      if (newSize < pos) pos = 0;
+      if (newSize === pos) return pos;
+
+      // On the initial pass, cap the read to the last MAX_INITIAL_BYTES to avoid OOM
+      const startPos = !initialDone && newSize - pos > MAX_INITIAL_BYTES
+        ? newSize - MAX_INITIAL_BYTES
+        : pos;
+
+      let text: string;
+      const fd = fs.openSync(logFile, "r");
+      try {
+        const len = newSize - startPos;
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, startPos);
+        text = buf.toString("utf8");
+      } finally {
+        fs.closeSync(fd);
       }
 
-      textBuffer = emitLines(textBuffer + buffer.toString("utf8"), onLine);
-      buffer = Buffer.alloc(0);
+      const lines = text.split("\n");
+      // If we jumped into the middle of the file, the first line may be partial — skip it
+      const processLines = startPos > pos ? lines.slice(1) : lines;
+
+      for (const line of processLines) {
+        if (!line) continue;
+        const entry = parseLogLine(line);
+        if (!entry) continue;
+
+        if (sinceUnix !== null) {
+          const entryUnix = Math.floor(Date.parse(entry.timestamp) / 1000);
+          if (Number.isNaN(entryUnix) || entryUnix < sinceUnix) continue;
+        }
+
+        if (!initialDone) {
+          initialBuf.push(entry);
+          continue;
+        }
+
+        if (emit && !destroyed) options.onEntry(entry);
+      }
+
+      return newSize;
+    } catch {
+      return pos;
     }
-  });
+  }
 
-  stream.on("end", () => {
-    if (textBuffer.trim().length > 0) {
-      onLine(textBuffer.trimEnd());
+  // First pass: read the tail of the file to collect entries
+  filePos = readAndEmit(0, false);
+
+  // Apply tail
+  const tailSlice = initialBuf.length > options.tail
+    ? initialBuf.slice(-options.tail)
+    : initialBuf;
+  for (const entry of tailSlice) {
+    if (!destroyed) options.onEntry(entry);
+  }
+  initialDone = true;
+
+  // Watch for changes
+  let watcher: fs.FSWatcher | null = null;
+  try {
+    watcher = fs.watch(logFile, (event) => {
+      if (destroyed) return;
+      // 'rename' fires on log rotation — reset position so the new file is read from start
+      if (event === "rename") filePos = 0;
+      filePos = readAndEmit(filePos, true);
+    });
+    watcher.on("error", (err) => {
+      if (!destroyed) options.onError(err instanceof Error ? err : new Error(String(err)));
+    });
+  } catch (err) {
+    if (!destroyed) {
+      options.onError(err instanceof Error ? err : new Error(String(err)));
     }
-  });
-}
-
-function looksLikeMultiplexFrame(buffer: Buffer): boolean {
-  return buffer.length >= 8 && (buffer[0] === 1 || buffer[0] === 2) && buffer[1] === 0 && buffer[2] === 0 && buffer[3] === 0;
-}
-
-function emitLines(text: string, onLine: (line: string) => void): string {
-  const lines = text.split(/\r?\n/);
-  const remainder = lines.pop() ?? "";
-  for (const line of lines) {
-    if (line.trim().length > 0) onLine(line);
-  }
-  return remainder;
-}
-
-function parseTimestamp(line: string): { timestamp: string; message: string } {
-  const match = line.match(/^(\d{4}-\d{2}-\d{2}T\S+)\s+(.*)$/);
-  if (!match) {
-    return { timestamp: new Date().toISOString(), message: line };
   }
 
-  return { timestamp: match[1], message: match[2] };
+  // Poll fallback for file rotation / edge cases
+  const pollTimer = setInterval(() => {
+    if (destroyed) return;
+    filePos = readAndEmit(filePos, true);
+  }, 2000);
+
+  return () => {
+    destroyed = true;
+    watcher?.close();
+    clearInterval(pollTimer);
+  };
 }
 
-function toDockerSince(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  if (/^\d+$/.test(trimmed)) return trimmed;
-
-  const duration = trimmed.match(/^(\d+)(s|m|h|d)$/i);
-  if (duration) {
-    const amount = Number(duration[1]);
-    const unit = duration[2].toLowerCase();
-    const multiplier = unit === "s" ? 1 : unit === "m" ? 60 : unit === "h" ? 3600 : 86400;
-    return String(Math.floor(Date.now() / 1000) - amount * multiplier);
-  }
-
-  const timestamp = Date.parse(trimmed);
-  if (!Number.isNaN(timestamp)) return String(Math.floor(timestamp / 1000));
-
-  return null;
+export function restartContainer(_containerName: string): never {
+  throw new Error(
+    "Container restart requires Docker API access, which is not available in filesystem-only mode. " +
+    "Restart the container from the host or configure a systemd timer."
+  );
 }

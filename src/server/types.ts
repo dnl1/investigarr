@@ -4,6 +4,7 @@ export type Service = {
   name: string;
   container: string;
   color: string;
+  source?: "default" | "custom";
 };
 
 export type ContainerSummary = {

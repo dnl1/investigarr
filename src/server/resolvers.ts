@@ -40,22 +40,11 @@ export type ResolverResult = {
   output?: string;
 };
 
-function readApiKey(container: string, configPath: string, service?: string): string {
-  const configured = service ? lookupApiKey(service) : null;
-  if (configured) return configured;
-  const output = execSync(
-    `docker exec ${container} sh -c "grep -o '<ApiKey>[^<]*</ApiKey>' ${configPath} | sed 's/<[^>]*>//g'"`,
-    { encoding: "utf8", timeout: 10000 }
-  ).trim();
-  if (!output) throw new Error(`Could not read API key from ${container}:${configPath}`);
-  return output;
-}
-
 export const resolvers: Resolver[] = [
   {
     id: "restart-service",
     title: "Restart service",
-    description: "Restart a selected media service to clear stuck queues, failed connections, stale browser sessions, or plugin issues.",
+    description: "[Unavailable — requires Docker API] Restart a selected service from the host with 'docker restart <container>'.",
     service: "general",
     actionLabel: "Restart",
     selectableService: {
@@ -67,7 +56,7 @@ export const resolvers: Resolver[] = [
         { label: "Jellyfin", value: "jellyfin" },
         { label: "Sonarr", value: "sonarr" },
         { label: "Radarr", value: "radarr" },
-        { label: "Jellyseerr", value: "jellyseerr" },
+        { label: "Seerr", value: "seerr" },
         { label: "Prowlarr", value: "prowlarr" }
       ]
     },
@@ -80,7 +69,7 @@ export const resolvers: Resolver[] = [
       { service: "jellyfin", pattern: /OutOfMemory|oom|stuck.*transcode|plugin.*error/i },
       { service: "sonarr", pattern: /NLog|Database.*locked|Too many open files/i },
       { service: "radarr", pattern: /NLog|Database.*locked|Too many open files/i },
-      { service: "jellyseerr", pattern: /Error|error|timeout|connection.*refused/i },
+      { service: "seerr", pattern: /Error|error|timeout|connection.*refused/i },
       { service: "prowlarr", pattern: /connection refused|ECONNREFUSED|could not connect/i }
     ],
     steps: [
@@ -151,7 +140,6 @@ export const resolvers: Resolver[] = [
 /** Replace `http://<service_name>:<port>/` with the configured service URL (if set) in a URL or command string. Also replaces `{$VAR}` placeholders with env var values. */
 function resolveStepUrl(text: string, service: string): string {
   let result = text;
-  // Env var substitution: {$JELLYFIN_API_KEY} etc.
   result = result.replace(/\{\$(\w+)\}/g, (_, name: string) => process.env[name] ?? `{\$${name}}`);
   const configured = lookupServiceUrl(service);
   if (!configured) return result;
@@ -159,6 +147,15 @@ function resolveStepUrl(text: string, service: string): string {
     const base = configured.replace(/\/$/, "");
     return base.endsWith(match.split("//")[1]?.split("/")[0]) ? match : `${base}/`;
   });
+}
+
+function readApiKey(service: string): string {
+  const key = lookupApiKey(service);
+  if (key) return key;
+  throw new Error(
+    `No API key configured for ${service}. Open the ⚙ Settings drawer and enter the API key manually. ` +
+    `Auto-extraction from container files is not available in filesystem-only mode.`
+  );
 }
 
 export async function runResolver(id: string, input?: { selectedService?: string }): Promise<{ id: string; results: ResolverResult[] }> {
@@ -173,17 +170,6 @@ export async function runResolver(id: string, input?: { selectedService?: string
   }
 
   const results: ResolverResult[] = [];
-  const keyCache = new Map<string, string>();
-
-  function getKey(container: string, path: string, service?: string): string {
-    const configured = service ? lookupApiKey(service) : null;
-    if (configured) return configured;
-    const cacheKey = `${container}:${path}`;
-    if (!keyCache.has(cacheKey)) {
-      keyCache.set(cacheKey, readApiKey(container, path, service));
-    }
-    return keyCache.get(cacheKey)!;
-  }
 
   for (const step of resolver.steps) {
     try {
@@ -210,7 +196,7 @@ export async function runResolver(id: string, input?: { selectedService?: string
           } else if (step.apiKeyEnv && process.env[step.apiKeyEnv]) {
             headers[step.apiKeyHeader || "X-Api-Key"] = process.env[step.apiKeyEnv]!;
           } else if (step.apiKeyContainer && step.apiKeyPath) {
-            const key = getKey(step.apiKeyContainer, step.apiKeyPath, resolver.service);
+            const key = readApiKey(resolver.service);
             headers[step.apiKeyHeader || "X-Api-Key"] = key;
           }
           const url = resolveStepUrl(step.url!, resolver.service);

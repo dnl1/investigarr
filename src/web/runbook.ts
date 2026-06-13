@@ -59,7 +59,7 @@ export const runbook: RunbookEntry[] = [
     ],
     steps: [
       { text: "Check if NPM healthcheck is the source — review NPM proxy config for the affected domain" },
-      { text: "If using Jellyseerr, verify the Jellyfin API key is correct under Settings > General" },
+      { text: "If using Seerr, verify the Jellyfin API key is correct under Settings > General" },
       { text: "For Sonarr/Radarr, check that API key in connecting apps matches config.xml", command: "grep ApiKey /mnt/data/sonarr/config.xml" },
       { text: "Add the Docker subnet to trusted proxies if behind a reverse proxy" }
     ]

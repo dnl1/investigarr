@@ -12,6 +12,7 @@ type ServiceStatus = {
   name: string;
   container: string;
   color: string;
+  source?: "default" | "custom";
   id: string | null;
   image: string | null;
   state: string;
@@ -31,6 +32,7 @@ type LogEntry = {
   level: LogLevel;
   message: string;
   meta: LogEntryMeta | null;
+  repeatCount?: number;
 };
 
 type Toast = { id: string; type: "success" | "error" | "info"; message: string };
@@ -57,21 +59,74 @@ function resolverStatus(results: ResolverResult[]): "ok" | "fail" | "running" {
 
 const levels: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal", "unknown"];
 const defaultLevels = new Set<LogLevel>(["info", "warn", "debug", "error", "fatal", "unknown"]);
-const defaultTailLimit = 1000;
-const tailLimitOptions = [500, 1000, 2000, 5000];
+const maxLogEntries = 1000;
+const defaultTailLimit = 500;
+const tailLimitOptions = [100, 250, 500, 1000];
+const estimatedLogRowHeight = 34;
+const logOverscan = 12;
+const preferencesKey = "investigarr:log-preferences";
 
 const runbookServices = [...new Set(runbook.map((e) => e.service))].sort();
 
+type StoredPreferences = {
+  selectedServices?: string[];
+  selectedLevels?: LogLevel[];
+  tailLimit?: number;
+  search?: string;
+  submittedSearch?: string;
+  autoScroll?: boolean;
+};
+
+function readPreferences(): StoredPreferences {
+  try {
+    const raw = window.localStorage.getItem(preferencesKey);
+    return raw ? JSON.parse(raw) as StoredPreferences : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePreferences(update: Partial<StoredPreferences>) {
+  const current = readPreferences();
+  window.localStorage.setItem(preferencesKey, JSON.stringify({ ...current, ...update }));
+}
+
+function sameLogMessage(a: LogEntry, b: LogEntry): boolean {
+  return a.service === b.service && a.level === b.level && a.message === b.message;
+}
+
+function addLogEntry(entry: LogEntry, entries: LogEntry[], limit: number): LogEntry[] {
+  const max = Math.min(limit, maxLogEntries);
+  const [first, ...rest] = entries;
+  if (first && sameLogMessage(entry, first)) {
+    return [{ ...entry, id: first.id, repeatCount: (first.repeatCount ?? 1) + 1 }, ...rest].slice(0, max);
+  }
+  return [entry, ...entries].slice(0, max);
+}
+
+function logWeight(entry: LogEntry): number {
+  return entry.repeatCount ?? 1;
+}
+
 function App() {
   const [services, setServices] = useState<ServiceStatus[]>([]);
+  const [availableContainers, setAvailableContainers] = useState<string[]>([]);
   const [selectedServices, setSelectedServices] = useState<Set<string>>(new Set());
-  const [selectedLevels, setSelectedLevels] = useState<Set<LogLevel>>(defaultLevels);
+  const [selectedLevels, setSelectedLevels] = useState<Set<LogLevel>>(() => {
+    const stored = readPreferences().selectedLevels?.filter((level): level is LogLevel => levels.includes(level));
+    return stored?.length ? new Set(stored) : defaultLevels;
+  });
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [tailLimit, setTailLimit] = useState(defaultTailLimit);
-  const [search, setSearch] = useState("");
-  const [submittedSearch, setSubmittedSearch] = useState("");
+  const [tailLimit, setTailLimit] = useState(() => {
+    const stored = readPreferences().tailLimit;
+    return stored && tailLimitOptions.includes(stored) ? stored : defaultTailLimit;
+  });
+  const [search, setSearch] = useState(() => readPreferences().search ?? "");
+  const [submittedSearch, setSubmittedSearch] = useState(() => readPreferences().submittedSearch ?? "");
   const [isPaused, setPaused] = useState(false);
-  const [autoScroll, setAutoScroll] = useState(true);
+  const [autoScroll, setAutoScroll] = useState(() => readPreferences().autoScroll ?? true);
+  const [logScrollTop, setLogScrollTop] = useState(0);
+  const [logViewportHeight, setLogViewportHeight] = useState(0);
   const [connected, setConnected] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -93,17 +148,19 @@ function App() {
   const [draftKeys, setDraftKeys] = useState<Record<string, string>>({});
   const [draftUrls, setDraftUrls] = useState<Record<string, string>>({});
   const [savingSettings, setSavingSettings] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const [customContainer, setCustomContainer] = useState("");
+  const [savingCustom, setSavingCustom] = useState(false);
   const pausedBuffer = useRef<LogEntry[]>([]);
   const isPausedRef = useRef(false);
   const logTopRef = useRef<HTMLDivElement | null>(null);
+  const logsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    void fetch("/api/services")
+    void refreshServices(true);
+    void fetch("/api/containers")
       .then((r) => r.json())
-      .then((data: ServiceStatus[]) => {
-        setServices(data);
-        setSelectedServices(new Set(data.map((s) => s.name)));
-      });
+      .then((data: string[]) => setAvailableContainers(data));
     void fetch("/api/actions/resolvers")
       .then((r) => r.json())
       .then((data: ResolverInfo[]) => {
@@ -123,6 +180,28 @@ function App() {
 
   const selectedServiceKey = useMemo(() => Array.from(selectedServices).sort().join(","), [selectedServices]);
   const selectedLevelKey = useMemo(() => Array.from(selectedLevels).sort().join(","), [selectedLevels]);
+
+  useEffect(() => {
+    if (services.length === 0) return;
+    savePreferences({ selectedServices: Array.from(selectedServices).sort() });
+  }, [services.length, selectedServiceKey]);
+
+  useEffect(() => {
+    savePreferences({ selectedLevels: Array.from(selectedLevels).sort() });
+  }, [selectedLevelKey]);
+
+  useEffect(() => {
+    savePreferences({ tailLimit, search, submittedSearch, autoScroll });
+  }, [tailLimit, search, submittedSearch, autoScroll]);
+
+  useEffect(() => {
+    const el = logsRef.current;
+    if (!el) return;
+    setLogViewportHeight(el.clientHeight);
+    const observer = new ResizeObserver(() => setLogViewportHeight(el.clientHeight));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     isPausedRef.current = isPaused;
@@ -146,7 +225,7 @@ function App() {
     source.addEventListener("log", (event) => {
       const entry = JSON.parse((event as MessageEvent).data) as LogEntry;
       if (isPausedRef.current) {
-        pausedBuffer.current = [entry, ...pausedBuffer.current].slice(0, tailLimit);
+        pausedBuffer.current = addLogEntry(entry, pausedBuffer.current, tailLimit);
         return;
       }
       appendLog(entry);
@@ -158,7 +237,7 @@ function App() {
 
   useEffect(() => {
     if (!isPaused && pausedBuffer.current.length > 0) {
-      setLogs((cur) => [...pausedBuffer.current, ...cur].slice(0, tailLimit));
+      setLogs((cur) => [...pausedBuffer.current, ...cur].slice(0, Math.min(tailLimit, maxLogEntries)));
       pausedBuffer.current = [];
     }
   }, [isPaused, tailLimit]);
@@ -178,6 +257,36 @@ function App() {
   }, [showRunbook, runbookEntry]);
 
   const suggestions = useMemo(() => evaluateSuggestions(logs), [logs]);
+
+  const logStats = useMemo(() => {
+    const byLevel = Object.fromEntries(levels.map((level) => [level, 0])) as Record<LogLevel, number>;
+    const byService = new Map<string, { total: number; issues: number }>();
+    for (const log of logs) {
+      const count = logWeight(log);
+      byLevel[log.level] += count;
+      const serviceStats = byService.get(log.service) ?? { total: 0, issues: 0 };
+      serviceStats.total += count;
+      if (log.level === "warn" || log.level === "error" || log.level === "fatal") serviceStats.issues += count;
+      byService.set(log.service, serviceStats);
+    }
+    return {
+      byLevel,
+      byService: [...byService.entries()].sort((a, b) => b[1].issues - a[1].issues || b[1].total - a[1].total)
+    };
+  }, [logs]);
+
+  const totalLogCount = useMemo(() => logs.reduce((sum, log) => sum + logWeight(log), 0), [logs]);
+
+  const virtualLogs = useMemo(() => {
+    const viewportRows = Math.ceil((logViewportHeight || window.innerHeight * 0.65) / estimatedLogRowHeight);
+    const start = Math.max(0, Math.floor(logScrollTop / estimatedLogRowHeight) - logOverscan);
+    const end = Math.min(logs.length, start + viewportRows + logOverscan * 2);
+    return {
+      entries: logs.slice(start, end),
+      topSpacer: start * estimatedLogRowHeight,
+      bottomSpacer: Math.max(0, logs.length - end) * estimatedLogRowHeight
+    };
+  }, [logs, logScrollTop, logViewportHeight]);
 
   const relevantResolverIds = useMemo(() => {
     const ids = new Set<string>();
@@ -235,7 +344,56 @@ function App() {
   }, [runbookFilter]);
 
   function appendLog(entry: LogEntry) {
-    setLogs((cur) => [entry, ...cur].slice(0, tailLimit));
+    setLogs((cur) => addLogEntry(entry, cur, tailLimit));
+  }
+
+  async function refreshServices(useStoredSelection = false) {
+    const data = await fetch("/api/services").then((r) => r.json()) as ServiceStatus[];
+    setServices(data);
+    const available = new Set(data.map((s) => s.name));
+    setSelectedServices((cur) => {
+      if (useStoredSelection) {
+        const stored = readPreferences().selectedServices?.filter((name) => available.has(name));
+        return new Set(stored?.length ? stored : data.map((s) => s.name));
+      }
+      const next = new Set([...cur].filter((name) => available.has(name)));
+      for (const service of data) {
+        if (service.source === "custom") next.add(service.name);
+      }
+      return next;
+    });
+  }
+
+  async function addCustomService() {
+    if (savingCustom) return;
+    setSavingCustom(true);
+    try {
+      const res = await fetch("/api/services/custom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: customName, container: customContainer })
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setCustomName("");
+      setCustomContainer("");
+      await refreshServices();
+      addToast("success", "Custom container added");
+    } catch (err) {
+      addToast("error", `Failed to add container: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingCustom(false);
+    }
+  }
+
+  async function removeCustomService(name: string) {
+    try {
+      const res = await fetch(`/api/services/custom/${encodeURIComponent(name)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      await refreshServices();
+      addToast("success", "Custom container removed");
+    } catch (err) {
+      addToast("error", `Failed to remove container: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   function toggleService(name: string) {
@@ -278,7 +436,7 @@ function App() {
 
   function downloadLogs() {
     const text = logs
-      .map((e) => `${e.timestamp} [${e.service}] ${e.level.toUpperCase()} ${e.message}`)
+      .map((e) => `${e.timestamp} [${e.service}] ${e.level.toUpperCase()} ${e.message}${e.repeatCount && e.repeatCount > 1 ? ` (repeated ${e.repeatCount}x)` : ""}`)
       .join("\n");
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
     const link = document.createElement("a");
@@ -289,7 +447,7 @@ function App() {
   }
 
   function addToast(type: Toast["type"], message: string) {
-    const id = crypto.randomUUID();
+    const id = crypto.getRandomValues(new Uint32Array(1))[0].toString(36);
     setToasts((cur) => [...cur, { id, type, message }]);
     setTimeout(() => setToasts((cur) => cur.filter((t) => t.id !== id)), 4000);
   }
@@ -535,7 +693,7 @@ function App() {
         </div>
         <div className="connBadge">
           <span className={`connDot ${connected ? "ok" : "bad"}`} />
-          {connected ? `${logs.length} lines` : "Reconnecting"}
+          {connected ? `${totalLogCount} events` : "Reconnecting"}
         </div>
       </header>
 
@@ -599,15 +757,57 @@ function App() {
             {services.map((s) => (
               <button
                 key={s.name}
-                className={`chip ${selectedServices.has(s.name) ? "active" : ""}`}
+                className={`chip ${s.source === "custom" ? "custom" : ""} ${selectedServices.has(s.name) ? "active" : ""}`}
                 style={{ "--accent": s.color } as React.CSSProperties}
                 onClick={() => toggleService(s.name)}
               >
                 <span className={`chipDot ${s.state === "running" ? "running" : "stopped"}`} />
                 {s.name}
+                {s.source === "custom" && (
+                  <span
+                    className="chipRemove"
+                    title="Remove custom container"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void removeCustomService(s.name);
+                    }}
+                  >
+                    ×
+                  </span>
+                )}
               </button>
             ))}
           </div>
+          <form
+            className="customServiceForm"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void addCustomService();
+            }}
+          >
+            <input
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              placeholder="Display name"
+            />
+            <input
+              value={customContainer}
+              onChange={(e) => {
+                setCustomContainer(e.target.value);
+                if (!customName.trim()) setCustomName(e.target.value);
+              }}
+              placeholder="Docker container name"
+              list="docker-containers"
+            />
+            <datalist id="docker-containers">
+              {availableContainers.map((container) => (
+                <option key={container} value={container} />
+              ))}
+            </datalist>
+            <button type="submit" disabled={savingCustom}>
+              {savingCustom ? "Adding..." : "Add container"}
+            </button>
+          </form>
         </div>
 
         <div className="panel">
@@ -649,6 +849,29 @@ function App() {
         </div>
       )}
 
+      <div className="statsRow">
+        <div className="statsCard levelStats">
+          <span className="statsTitle">Levels</span>
+          {levels.map((level) => (
+            <span key={level} className={`statPill ${level}`}>
+              {level} <strong>{logStats.byLevel[level]}</strong>
+            </span>
+          ))}
+        </div>
+        <div className="statsCard serviceStats">
+          <span className="statsTitle">Services</span>
+          {logStats.byService.slice(0, 8).map(([service, stats]) => {
+            const svc = services.find((s) => s.name === service);
+            return (
+              <span key={service} className="serviceStat" style={{ "--accent": svc?.color ?? "#6b7084" } as React.CSSProperties}>
+                {service} <strong>{stats.total}</strong>
+                {stats.issues > 0 && <em>{stats.issues} issues</em>}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Logs */}
       <section className="logPanel">
         <div className="logHead">
@@ -661,9 +884,14 @@ function App() {
               : "live"}
           </span>
         </div>
-        <div className="logs">
+        <div
+          className="logs"
+          ref={logsRef}
+          onScroll={(e) => setLogScrollTop(e.currentTarget.scrollTop)}
+        >
           <div ref={logTopRef} />
-          {logs.map((entry) => {
+          {virtualLogs.topSpacer > 0 && <div style={{ height: virtualLogs.topSpacer }} />}
+          {virtualLogs.entries.map((entry) => {
             const svc = services.find((s) => s.name === entry.service);
             const isExpanded = expanded.has(entry.id);
             return (
@@ -678,12 +906,14 @@ function App() {
                   </span>
                   <span className="lvl">{entry.level}</span>
                   <p>{entry.message}</p>
+                  {entry.repeatCount && entry.repeatCount > 1 && <span className="repeatBadge">x{entry.repeatCount}</span>}
                   <span className="expander">{isExpanded ? "−" : "+"}</span>
                 </div>
                 {isExpanded && <LogMeta entry={entry} />}
               </article>
             );
           })}
+          {virtualLogs.bottomSpacer > 0 && <div style={{ height: virtualLogs.bottomSpacer }} />}
         </div>
       </section>
 
