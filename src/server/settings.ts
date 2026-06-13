@@ -15,12 +15,14 @@ export type ServiceConfig = {
 export type Settings = {
   apiKeys: Record<string, string>;
   serviceUrls: Record<string, string>;
+  logPaths: Record<string, string>;
   customServices: Service[];
 };
 
 const DEFAULTS: Settings = {
   apiKeys: {},
   serviceUrls: {},
+  logPaths: {},
   customServices: []
 };
 
@@ -38,6 +40,7 @@ function load(): Settings {
     return {
       apiKeys: { ...DEFAULTS.apiKeys, ...(parsed.apiKeys || {}) },
       serviceUrls: { ...generateDefaults().serviceUrls, ...(parsed.serviceUrls || {}) },
+      logPaths: { ...(parsed.logPaths || {}) },
       customServices: sanitizeCustomServices(parsed.customServices || [])
     };
   } catch {
@@ -59,7 +62,7 @@ function generateDefaults(): Settings {
       urls[svc.name] = `http://${svc.container}:${port}`;
     }
   }
-  return { apiKeys: {}, serviceUrls: urls, customServices: [] };
+  return { apiKeys: {}, serviceUrls: urls, logPaths: {}, customServices: [] };
 }
 
 export function getSettings(): Settings {
@@ -67,6 +70,7 @@ export function getSettings(): Settings {
   return {
     apiKeys: { ...current.apiKeys },
     serviceUrls: { ...current.serviceUrls },
+    logPaths: { ...current.logPaths },
     customServices: current.customServices.map((svc) => ({ ...svc }))
   };
 }
@@ -78,6 +82,9 @@ export function updateSettings(partial: Partial<Settings>): Settings {
   }
   if (partial.serviceUrls !== undefined) {
     s.serviceUrls = { ...partial.serviceUrls };
+  }
+  if (partial.logPaths !== undefined) {
+    s.logPaths = { ...partial.logPaths };
   }
   if (partial.customServices !== undefined) {
     s.customServices = sanitizeCustomServices(partial.customServices);
@@ -114,9 +121,11 @@ export function removeCustomService(name: string): boolean {
   if (next.length === s.customServices.length) return false;
   const apiKeys = { ...s.apiKeys };
   const serviceUrls = { ...s.serviceUrls };
+  const logPaths = { ...s.logPaths };
   delete apiKeys[name];
   delete serviceUrls[name];
-  updateSettings({ customServices: next, apiKeys, serviceUrls });
+  delete logPaths[name];
+  updateSettings({ customServices: next, apiKeys, serviceUrls, logPaths });
   return true;
 }
 

@@ -50,6 +50,12 @@ type ResolverInfo = {
 };
 type ResolverResult = { label: string; status: "ok" | "fail" | "running"; error?: string; output?: string };
 type ResolverExecution = { id: string; results: ResolverResult[] };
+type SettingsResponse = {
+  apiKeys: Record<string, string>;
+  apiKeyConfigured?: Record<string, boolean>;
+  serviceUrls: Record<string, string>;
+  logPaths: Record<string, string>;
+};
 
 function resolverStatus(results: ResolverResult[]): "ok" | "fail" | "running" {
   if (results.some((r) => r.status === "fail")) return "fail";
@@ -144,9 +150,12 @@ function App() {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [selectedRestartSvcs, setSelectedRestartSvcs] = useState<Set<string>>(new Set());
   const [showSettings, setShowSettings] = useState(false);
-  const [settings, setSettings] = useState<{ apiKeys: Record<string, string>; serviceUrls: Record<string, string> }>({ apiKeys: {}, serviceUrls: {} });
+  const [settings, setSettings] = useState<{ apiKeys: Record<string, string>; serviceUrls: Record<string, string>; logPaths: Record<string, string> }>({ apiKeys: {}, serviceUrls: {}, logPaths: {} });
   const [draftKeys, setDraftKeys] = useState<Record<string, string>>({});
+  const [configuredKeys, setConfiguredKeys] = useState<Record<string, boolean>>({});
+  const [clearedKeys, setClearedKeys] = useState<Set<string>>(new Set());
   const [draftUrls, setDraftUrls] = useState<Record<string, string>>({});
+  const [draftPaths, setDraftPaths] = useState<Record<string, string>>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [customName, setCustomName] = useState("");
   const [customContainer, setCustomContainer] = useState("");
@@ -171,10 +180,13 @@ function App() {
       });
     void fetch("/api/settings")
       .then((r) => r.json())
-      .then((data: { apiKeys: Record<string, string>; serviceUrls: Record<string, string> }) => {
-        setSettings({ apiKeys: data.apiKeys, serviceUrls: data.serviceUrls });
-        setDraftKeys({ ...data.apiKeys });
+      .then((data: SettingsResponse) => {
+        setSettings({ apiKeys: data.apiKeys, serviceUrls: data.serviceUrls, logPaths: data.logPaths ?? {} });
+        setConfiguredKeys({ ...(data.apiKeyConfigured ?? {}) });
+        setDraftKeys({});
+        setClearedKeys(new Set());
         setDraftUrls({ ...data.serviceUrls });
+        setDraftPaths({ ...(data.logPaths ?? {}) });
       });
   }, []);
 
@@ -738,7 +750,7 @@ function App() {
             <span className="resolve-badge">{relevantResolverIds.size}</span>
           )}
         </button>
-        <button className="btn-accent settings-btn" title="API Keys" onClick={() => { setDraftKeys({ ...settings.apiKeys }); setDraftUrls({ ...settings.serviceUrls }); setShowSettings(true); }}>
+        <button className="btn-accent settings-btn" title="API Keys" onClick={() => { setDraftKeys({}); setClearedKeys(new Set()); setDraftUrls({ ...settings.serviceUrls }); setDraftPaths({ ...settings.logPaths }); setShowSettings(true); }}>
           ⚙
         </button>
       </div>
@@ -934,7 +946,7 @@ function App() {
             <div className="rb-header">
               <div>
                 <h2>Service Settings</h2>
-                <p className="rb-subtitle">Configure API keys and URLs for each service. URLs are auto-filled for Docker — change them if running services on different hosts.</p>
+                <p className="rb-subtitle">Configure API keys, service URLs, and log file paths. All fields are optional — leave blank to use auto-detected values.</p>
               </div>
               <button className="rb-close" onClick={() => setShowSettings(false)}>✕</button>
             </div>
@@ -950,12 +962,18 @@ function App() {
                       <input
                         type="password"
                         className="settings-input"
-                        placeholder={draftKeys[svc.name] ? "••••••••" : "No key configured"}
+                        placeholder={configuredKeys[svc.name] ? "Configured — leave blank to keep" : "No key configured"}
                         value={draftKeys[svc.name] ?? ""}
-                        onChange={(e) => setDraftKeys((cur) => ({ ...cur, [svc.name]: e.target.value }))}
+                        onChange={(e) => {
+                          setClearedKeys((cur) => { const n = new Set(cur); n.delete(svc.name); return n; });
+                          setDraftKeys((cur) => ({ ...cur, [svc.name]: e.target.value }));
+                        }}
                       />
-                      {draftKeys[svc.name] && (
-                        <button className="settings-clear" onClick={() => setDraftKeys((cur) => { const n = { ...cur }; delete n[svc.name]; return n; })}>✕</button>
+                      {(draftKeys[svc.name] || configuredKeys[svc.name]) && (
+                        <button className="settings-clear" onClick={() => {
+                          setDraftKeys((cur) => { const n = { ...cur }; delete n[svc.name]; return n; });
+                          setClearedKeys((cur) => new Set(cur).add(svc.name));
+                        }}>✕</button>
                       )}
                     </div>
                   )}
@@ -971,6 +989,18 @@ function App() {
                       <button className="settings-clear" onClick={() => setDraftUrls((cur) => { const n = { ...cur }; delete n[svc.name]; return n; })}>✕</button>
                     )}
                   </div>
+                  <div className="settings-input-row">
+                    <input
+                      type="text"
+                      className="settings-input"
+                      placeholder="Log file path (auto-detected)"
+                      value={draftPaths[svc.name] ?? ""}
+                      onChange={(e) => setDraftPaths((cur) => ({ ...cur, [svc.name]: e.target.value }))}
+                    />
+                    {draftPaths[svc.name] && (
+                      <button className="settings-clear" onClick={() => setDraftPaths((cur) => { const n = { ...cur }; delete n[svc.name]; return n; })}>✕</button>
+                    )}
+                  </div>
                 </div>
               ))}
               <button
@@ -983,17 +1013,27 @@ function App() {
                     for (const [k, v] of Object.entries(draftKeys)) {
                       if (v.trim()) cleanedKeys[k] = v.trim();
                     }
+                    for (const k of clearedKeys) cleanedKeys[k] = "";
                     const cleanedUrls: Record<string, string> = {};
                     for (const [k, v] of Object.entries(draftUrls)) {
                       if (v.trim()) cleanedUrls[k] = v.trim();
                     }
+                    const cleanedPaths: Record<string, string> = {};
+                    for (const [k, v] of Object.entries(draftPaths)) {
+                      if (v.trim()) cleanedPaths[k] = v.trim();
+                    }
                     const res = await fetch("/api/settings", {
                       method: "PUT",
                       headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ apiKeys: cleanedKeys, serviceUrls: cleanedUrls })
+                      body: JSON.stringify({ apiKeys: cleanedKeys, serviceUrls: cleanedUrls, logPaths: cleanedPaths })
                     });
                     if (!res.ok) throw new Error(await res.text());
-                    setSettings({ apiKeys: cleanedKeys, serviceUrls: cleanedUrls });
+                    const nextConfigured = { ...configuredKeys };
+                    for (const [k, v] of Object.entries(cleanedKeys)) nextConfigured[k] = Boolean(v);
+                    setSettings({ apiKeys: {}, serviceUrls: cleanedUrls, logPaths: cleanedPaths });
+                    setConfiguredKeys(nextConfigured);
+                    setDraftKeys({});
+                    setClearedKeys(new Set());
                     addToast("success", "Settings saved");
                     setShowSettings(false);
                   } catch (err) {
