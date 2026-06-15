@@ -58,7 +58,8 @@ export const resolvers: Resolver[] = [
         { label: "Sonarr", value: "sonarr" },
         { label: "Radarr", value: "radarr" },
         { label: "Seerr", value: "seerr" },
-        { label: "Prowlarr", value: "prowlarr" }
+        { label: "Prowlarr", value: "prowlarr" },
+        { label: "Bazarr", value: "bazarr" }
       ]
     },
     relevantLogPatterns: [
@@ -120,6 +121,19 @@ export const resolvers: Resolver[] = [
       { label: "Searching for all missing episodes...", type: "api", url: "http://sonarr:8989/api/v3/command", method: "POST", body: { name: "MissingEpisodeSearch" }, apiKeyContainer: "sonarr", apiKeyPath: "/config/config.xml" },
       { label: "Waiting for search to propagate...", type: "wait", duration: 3000 },
       { label: "Refreshing monitored downloads...", type: "api", url: "http://sonarr:8989/api/v3/command", method: "POST", body: { name: "RefreshMonitoredDownloads" }, apiKeyContainer: "sonarr", apiKeyPath: "/config/config.xml" }
+    ]
+  },
+  {
+    id: "fix-bazarr-permissions",
+    title: "Fix media file permissions",
+    description: "Chown all media files to match the PUID/PGID used by Bazarr and other services. Fixes PermissionError when saving subtitles.",
+    service: "bazarr",
+    actionLabel: "Fix Permissions",
+    relevantLogPatterns: [
+      { service: "bazarr", pattern: /PermissionError|Permission denied|Error saving Subtitles/i }
+    ],
+    steps: [
+      { label: "Fixing media ownership to match container PUID/PGID...", type: "host", command: "echo \"PUID=${PUID:-1000} PGID=${PGID:-1000}\" && chown -R \"${PUID:-1000}:${PGID:-1000}\" /media 2>&1 && echo 'Permissions fixed successfully.'" }
     ]
   },
   {

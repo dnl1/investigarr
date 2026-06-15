@@ -9,6 +9,8 @@ services:
     ports:
       - "${DOCKER_BIND_IP}:8788:8788"
     environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
       - TZ=${TZ:-America/Sao_Paulo}
       - PORT=${PORT:-8788}
       - INVESTIGARR_USERNAME=${INVESTIGARR_USERNAME:-admin}
@@ -21,6 +23,7 @@ services:
     volumes:
       - ${DOCKER_CONTAINERS_DIR:-/var/lib/docker/containers}:/var/lib/docker/containers:ro
       - ./data:/app/data
+      - ${DOCKER_MEDIA_DIR:-/mnt/internal/media}:/media
     networks:
       - media-net
       - investigarr-internal

@@ -310,6 +310,32 @@ const rules: Array<{
     action: null
   },
   {
+    id: "bazarr-permission-denied",
+    title: "Bazarr permission denied saving subtitles",
+    description: "Bazarr cannot write subtitle files to the media directory — file ownership does not match the container's PUID/PGID.",
+    severity: "error",
+    ref: "bazarr-permission-denied",
+    resolverId: "fix-bazarr-permissions",
+    check: (logs) => {
+      const recent = recentEntries(logs, 15);
+      const errors = recent.filter(
+        (e) =>
+          e.service === "bazarr" &&
+          (e.message.includes("PermissionError") || e.message.includes("Permission denied") || e.message.includes("Error saving Subtitles"))
+      );
+      if (errors.length >= 1) {
+        const files = errors.map((e) => {
+          const m = e.message.match(/file\s+(.*?):/i) || e.message.match(/for this file\s+(.*?):/i);
+          return m ? m[1].trim() : "(unknown)";
+        });
+        const unique = [...new Set(files)];
+        return { active: true, details: `${errors.length} error(s), affected file(s): ${unique.slice(0, 3).join(", ")}. File ownership likely does not match container PUID/PGID.` };
+      }
+      return { active: false };
+    },
+    action: { label: "Fix media permissions", container: "bazarr" }
+  },
+  {
     id: "jellyfin-missing-files",
     title: "Jellyfin file not found",
     description: "Jellyfin cannot find file(s) on disk — Sonarr/Radarr likely moved or upgraded the media. A library refresh will re-scan paths.",

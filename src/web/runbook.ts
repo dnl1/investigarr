@@ -236,6 +236,30 @@ export const runbook: RunbookEntry[] = [
     ]
   },
   {
+    id: "bazarr-permission-denied",
+    title: "Bazarr Permission Denied Saving Subtitles",
+    description: "Bazarr cannot save subtitle files to the media directory because file ownership (uid/gid) does not match the container's configured PUID/PGID.",
+    service: "bazarr",
+    severity: "error",
+    symptoms: [
+      "PermissionError(13, 'Permission denied') in Bazarr logs",
+      "Error saving Subtitles file to disk for this file /data/media/...",
+      "Bazarr downloads subtitles but cannot write the .srt file next to the media file"
+    ],
+    causes: [
+      "Media files are owned by a different uid/gid than the container runs as (e.g. files owned by 911:911 but Bazarr uses PUID=1000, PGID=1000)",
+      "Files were downloaded by a container that previously used different PUID/PGID settings",
+      "Files were copied/rsync'd from another system with different user mappings",
+      "Directory permissions (chmod) restrict write access to the wrong group"
+    ],
+    steps: [
+      { text: "Fix all media ownership to match the container PUID/PGID", command: "chown -R PUID:PGID /path/to/media", action: { label: "Fix media permissions", container: "bazarr" } },
+      { text: "Verify Bazarr PUID/PGID env vars match the media owner", command: "docker inspect bazarr --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'PUID|PGID'" },
+      { text: "Check current ownership of the media directory", command: "stat -c '%U:%G %a' /path/to/media/Movies" },
+      { text: "Ensure all *arr containers (Sonarr, Radarr, Bazarr) use the same PUID/PGID", command: "grep -r 'PUID\|PGID' docker-compose.yml" }
+    ]
+  },
+  {
     id: "disk-space",
     title: "Low Disk Space / No Space Left",
     description: "The host or container volume is running out of disk space, causing write failures.",
