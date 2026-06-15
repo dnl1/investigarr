@@ -47,6 +47,7 @@ type ResolverInfo = {
   actionLabel?: string;
   selectableService?: { label: string; default: string; options: Array<{ label: string; value: string }> };
   relevantLogPatterns?: PatternDef[];
+  preCheck?: { type: string; command: string };
 };
 type ResolverResult = { label: string; status: "ok" | "fail" | "running"; error?: string; code?: string; output?: string };
 type ResolverExecution = { id: string; results: ResolverResult[] };
@@ -75,6 +76,8 @@ const preferencesKey = "investigarr:log-preferences";
 
 const runbookServices = [...new Set(runbook.map((e) => e.service))].sort();
 
+type TimePreset = "30m" | "1h" | "12h" | "1d" | "custom" | "all";
+
 type StoredPreferences = {
   selectedServices?: string[];
   selectedLevels?: LogLevel[];
@@ -82,6 +85,9 @@ type StoredPreferences = {
   search?: string;
   submittedSearch?: string;
   autoScroll?: boolean;
+  timePreset?: TimePreset;
+  customTimeStart?: string;
+  customTimeEnd?: string;
 };
 
 function readPreferences(): StoredPreferences {
@@ -167,6 +173,11 @@ function App() {
   const logTopRef = useRef<HTMLDivElement | null>(null);
   const logsRef = useRef<HTMLDivElement | null>(null);
 
+  // Time filter
+  const [timePreset, setTimePreset] = useState<TimePreset>(() => readPreferences().timePreset ?? "all");
+  const [customTimeStart, setCustomTimeStart] = useState(() => readPreferences().customTimeStart ?? "");
+  const [customTimeEnd, setCustomTimeEnd] = useState(() => readPreferences().customTimeEnd ?? "");
+
   useEffect(() => {
     void refreshServices(true);
     void fetch("/api/containers")
@@ -208,6 +219,10 @@ function App() {
   useEffect(() => {
     savePreferences({ tailLimit, search, submittedSearch, autoScroll });
   }, [tailLimit, search, submittedSearch, autoScroll]);
+
+  useEffect(() => {
+    savePreferences({ timePreset, customTimeStart, customTimeEnd });
+  }, [timePreset, customTimeStart, customTimeEnd]);
 
   useEffect(() => {
     const el = logsRef.current;
@@ -271,12 +286,28 @@ function App() {
     }
   }, [showRunbook, runbookEntry]);
 
-  const suggestions = useMemo(() => evaluateSuggestions(logs), [logs]);
+  const filteredLogs = useMemo(() => {
+    if (timePreset === "all") return logs;
+    if (timePreset === "custom") {
+      const start = customTimeStart ? new Date(customTimeStart).getTime() : 0;
+      const end = customTimeEnd ? new Date(customTimeEnd).getTime() : Infinity;
+      return logs.filter((log) => {
+        const t = new Date(log.timestamp).getTime();
+        return t >= start && t <= end;
+      });
+    }
+    const now = Date.now();
+    const durations: Record<string, number> = { "30m": 30 * 60 * 1000, "1h": 60 * 60 * 1000, "12h": 12 * 60 * 60 * 1000, "1d": 24 * 60 * 60 * 1000 };
+    const cutoff = now - (durations[timePreset] ?? 0);
+    return logs.filter((log) => new Date(log.timestamp).getTime() >= cutoff);
+  }, [logs, timePreset, customTimeStart, customTimeEnd]);
+
+  const suggestions = useMemo(() => evaluateSuggestions(filteredLogs), [filteredLogs]);
 
   const logStats = useMemo(() => {
     const byLevel = Object.fromEntries(levels.map((level) => [level, 0])) as Record<LogLevel, number>;
     const byService = new Map<string, { total: number; issues: number }>();
-    for (const log of logs) {
+    for (const log of filteredLogs) {
       const count = logWeight(log);
       byLevel[log.level] += count;
       const serviceStats = byService.get(log.service) ?? { total: 0, issues: 0 };
@@ -288,22 +319,22 @@ function App() {
       byLevel,
       byService: [...byService.entries()].sort((a, b) => b[1].issues - a[1].issues || b[1].total - a[1].total)
     };
-  }, [logs]);
+  }, [filteredLogs]);
 
-  const totalLogCount = useMemo(() => logs.reduce((sum, log) => sum + logWeight(log), 0), [logs]);
+  const totalLogCount = useMemo(() => filteredLogs.reduce((sum, log) => sum + logWeight(log), 0), [filteredLogs]);
 
-  const virtualLogs = useMemo(() => {
+   const virtualLogs = useMemo(() => {
     const viewportRows = Math.ceil((logViewportHeight || window.innerHeight * 0.65) / estimatedLogRowHeight);
     const start = Math.max(0, Math.floor(logScrollTop / estimatedLogRowHeight) - logOverscan);
-    const end = Math.min(logs.length, start + viewportRows + logOverscan * 2);
+    const end = Math.min(filteredLogs.length, start + viewportRows + logOverscan * 2);
     return {
-      entries: logs.slice(start, end),
+      entries: filteredLogs.slice(start, end),
       topSpacer: start * estimatedLogRowHeight,
-      bottomSpacer: Math.max(0, logs.length - end) * estimatedLogRowHeight
+      bottomSpacer: Math.max(0, filteredLogs.length - end) * estimatedLogRowHeight
     };
-  }, [logs, logScrollTop, logViewportHeight]);
+  }, [filteredLogs, logScrollTop, logViewportHeight]);
 
-  const relevantResolverIds = useMemo(() => {
+  const logRelevantIds = useMemo(() => {
     const ids = new Set<string>();
     for (const s of suggestions) {
       if (s.resolverId) ids.add(s.resolverId);
@@ -312,7 +343,7 @@ function App() {
       if (!r.relevantLogPatterns) continue;
       const matches = r.relevantLogPatterns.some((p) => {
         const re = new RegExp(p.pattern, p.flags ?? "");
-        return logs.some((log) => {
+        return filteredLogs.some((log) => {
           if (p.service && log.service !== p.service) return false;
           return re.test(log.message);
         });
@@ -320,7 +351,36 @@ function App() {
       if (matches) ids.add(r.id);
     }
     return ids;
-  }, [suggestions, resolvers, logs]);
+  }, [suggestions, resolvers, filteredLogs]);
+
+  const [preCheckFailIds, setPreCheckFailIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const resolversWithPreCheck = resolvers.filter((r) => r.preCheck);
+    if (resolversWithPreCheck.length === 0) return;
+    let cancelled = false;
+    for (const r of resolversWithPreCheck) {
+      fetch(`/api/actions/resolver-check/${r.id}`)
+        .then((res) => res.json())
+        .then((data: { id: string; relevant: boolean }) => {
+          if (cancelled) return;
+          setPreCheckFailIds((cur) => {
+            const next = new Set(cur);
+            if (data.relevant) next.delete(data.id);
+            else next.add(data.id);
+            return next;
+          });
+        })
+        .catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [resolvers, showResolve]);
+
+  const relevantResolverIds = useMemo(() => {
+    const filtered = new Set(logRelevantIds);
+    for (const id of preCheckFailIds) filtered.delete(id);
+    return filtered;
+  }, [logRelevantIds, preCheckFailIds]);
 
   const recommendedRestartSvcs = useMemo(() => {
     const svcs = new Set<string>();
@@ -328,7 +388,7 @@ function App() {
     if (!restartR?.relevantLogPatterns || !restartR.selectableService) return svcs;
     for (const rp of restartR.relevantLogPatterns) {
       const re = new RegExp(rp.pattern, rp.flags ?? "");
-      for (const log of logs) {
+      for (const log of filteredLogs) {
         if (rp.service && log.service !== rp.service) continue;
         if (re.test(log.message)) {
           if (rp.service) svcs.add(rp.service);
@@ -337,7 +397,7 @@ function App() {
       }
     }
     return svcs;
-  }, [resolvers, logs]);
+  }, [resolvers, filteredLogs]);
 
   const sortedResolvers = useMemo(() => {
     return [...resolvers].sort((a, b) => {
@@ -450,7 +510,7 @@ function App() {
   }
 
   function downloadLogs() {
-    const text = logs
+    const text = filteredLogs
       .map((e) => `${e.timestamp} [${e.service}] ${e.level.toUpperCase()} ${e.message}${e.repeatCount && e.repeatCount > 1 ? ` (repeated ${e.repeatCount}x)` : ""}`)
       .join("\n");
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
@@ -773,6 +833,36 @@ function App() {
             ))}
           </select>
         </label>
+        <label className="tailSelect timeSelect">
+          <span>Time</span>
+          <select value={timePreset} onChange={(e) => setTimePreset(e.target.value as TimePreset)}>
+            <option value="30m">Last 30 min</option>
+            <option value="1h">Last 1 hour</option>
+            <option value="12h">Last 12 hours</option>
+            <option value="1d">Last 1 day</option>
+            <option value="custom">Custom</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+        {timePreset === "custom" && (
+          <>
+            <input
+              type="datetime-local"
+              className="customTimeInput"
+              value={customTimeStart}
+              onChange={(e) => setCustomTimeStart(e.target.value)}
+              placeholder="From"
+            />
+            <span className="customTimeSep">–</span>
+            <input
+              type="datetime-local"
+              className="customTimeInput"
+              value={customTimeEnd}
+              onChange={(e) => setCustomTimeEnd(e.target.value)}
+              placeholder="To"
+            />
+          </>
+        )}
         <div className="spacer" />
         <button onClick={() => setPaused((v) => !v)}>{isPaused ? "Resume" : "Pause"}</button>
         <button onClick={() => setAutoScroll((v) => !v)}>

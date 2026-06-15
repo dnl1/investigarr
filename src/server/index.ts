@@ -6,7 +6,7 @@ import fastifyStatic from "@fastify/static";
 import { logSince, logTail, port } from "./config.js";
 import { getServiceStatuses, listContainers, restartContainer, DockerProxyRequiredError } from "./docker.js";
 import { LogHub } from "./log-hub.js";
-import { resolvers, runResolver } from "./resolvers.js";
+import { resolvers, runResolver, runPreCheck } from "./resolvers.js";
 import { addCustomService, getAllServices, type Settings, getSettings, removeCustomService, updateSettings } from "./settings.js";
 import type { LogEntry } from "./types.js";
 
@@ -150,7 +150,8 @@ app.get("/api/actions/resolvers", async () =>
       flags: p.pattern.flags
     })),
     actionLabel: r.actionLabel,
-    selectableService: r.selectableService
+    selectableService: r.selectableService,
+    preCheck: r.preCheck ? { type: r.preCheck.type, command: r.preCheck.command } : undefined
   }))
 );
 
@@ -162,6 +163,12 @@ app.post("/api/actions/resolve/:id", async (request, reply) => {
   } catch (err) {
     reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
   }
+});
+
+app.get("/api/actions/resolver-check/:id", async (request) => {
+  const { id } = request.params as { id: string };
+  const relevant = await runPreCheck(id);
+  return { id, relevant };
 });
 
 app.get("/api/settings", async () => {

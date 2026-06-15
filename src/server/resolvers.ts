@@ -31,6 +31,10 @@ export type Resolver = {
     options: Array<{ label: string; value: string }>;
   };
   relevantLogPatterns?: Array<{ service?: string; pattern: RegExp }>;
+  preCheck?: {
+    type: "host";
+    command: string;
+  };
 };
 
 export type ResolverResult = {
@@ -132,6 +136,10 @@ export const resolvers: Resolver[] = [
     relevantLogPatterns: [
       { service: "bazarr", pattern: /PermissionError|Permission denied|Error saving Subtitles/i }
     ],
+    preCheck: {
+      type: "host",
+      command: "find /media -not \\( -user \"${PUID:-1000}\" -a -group \"${PGID:-1000}\" \\) 2>/dev/null | head -1 | grep -q ."
+    },
     steps: [
       { label: "Fixing media ownership to match container PUID/PGID...", type: "host", command: "echo \"PUID=${PUID:-1000} PGID=${PGID:-1000}\" && chown -R \"${PUID:-1000}:${PGID:-1000}\" /media 2>&1 && echo 'Permissions fixed successfully.'" }
     ]
@@ -249,4 +257,27 @@ export function checkResolverRelevance(resolverId: string, logs: Array<{ service
       return rp.pattern.test(log.message);
     })
   );
+}
+
+const preCheckCache = new Map<string, { result: boolean; at: number }>();
+const PRECHECK_TTL = 30_000;
+
+/** Runs a resolver's preCheck (if defined). Returns true if the problem still exists (resolver is relevant). Cached for 30s. */
+export async function runPreCheck(resolverId: string): Promise<boolean> {
+  const cached = preCheckCache.get(resolverId);
+  if (cached && Date.now() - cached.at < PRECHECK_TTL) return cached.result;
+
+  const resolver = resolvers.find((r) => r.id === resolverId);
+  if (!resolver?.preCheck) return true; // no preCheck = always relevant
+
+  try {
+    execSync(resolver.preCheck.command, { timeout: 10_000, encoding: "utf8", stdio: "pipe" });
+    // exit 0 = problem still exists = relevant
+    preCheckCache.set(resolverId, { result: true, at: Date.now() });
+    return true;
+  } catch {
+    // exit non-zero = problem already fixed = not relevant
+    preCheckCache.set(resolverId, { result: false, at: Date.now() });
+    return false;
+  }
 }

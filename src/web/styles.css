@@ -153,6 +153,27 @@ button:hover {
   border-color: var(--accent);
 }
 
+.customTimeInput {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.48rem 0.5rem;
+  outline: none;
+  font-size: 0.8rem;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", ui-monospace, monospace;
+  width: 175px;
+}
+
+.customTimeInput:focus {
+  border-color: var(--accent);
+}
+
+.customTimeSep {
+  color: var(--text-3);
+  font-size: 0.85rem;
+}
+
 /* Filter panels row */
 .filterRow {
   display: grid;
@@ -1242,9 +1263,6 @@ button:disabled {
   color: var(--text-3);
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 49px;
-  z-index: 4;
 }
 
 /* ─── Service multi-select (restart) ─── */
